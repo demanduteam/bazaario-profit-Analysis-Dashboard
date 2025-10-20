@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Profit Analysis Dashboard</title>
+    
+    <!-- Core Libraries -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        vazir: ['Vazirmatn', 'sans-serif'],
+                    },
+                },
+            },
+        }
+    </script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700&display=swap');
+        body {
+            font-family: 'Vazirmatn', sans-serif;
+            background-color: #f3f4f6;
+        }
+        .dark body {
+            background-color: #111827;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 2rem auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="dark">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // ==================================================
+        // Supabase Client Setup
+        // ==================================================
+        const { createClient } = supabase;
+        const supabaseUrl = 'https://wehyjatotbzxargnxasg.supabase.co';
+        const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndlaHlqYXRvdGJ6eGFyZ254YXNnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE5MTIwMjEsImV4cCI6MjA2NzQ4ODAyMX0.2R448DuEBlTrNvaYXiYZ8D5M7MJNv7n1qmIDHQBNFiY';
+        const supabaseClient = createClient(supabaseUrl, supabaseKey, { global: { fetch: window.fetch.bind(window) } });
+
+        // ==================================================
+        // Helper Functions
+        // ==================================================
+        const formatCurrency = (value) => {
+            if (value === null || typeof value === 'undefined' || isNaN(value)) return '۰';
+            return `${Number(value).toLocaleString('fa-IR')}`;
+        };
+
+        const ProfitAnalysisDashboard = () => {
+            const [invoices, setInvoices] = React.useState([]);
+            const [summary, setSummary] = React.useState({ totalRevenue: 0, totalCosts: 0, totalProfit: 0, totalShippingProfitLoss: 0 });
+            const [isLoading, setIsLoading] = React.useState(false);
+            const [error, setError] = React.useState('');
+            const [dateRange, setDateRange] = React.useState({
+                start: new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString().split('T')[0],
+                end: new Date().toISOString().split('T')[0]
+            });
+            const [expandedInvoiceId, setExpandedInvoiceId] = React.useState(null);
+
+            const handleDateChange = (e) => {
+                setDateRange(prev => ({ ...prev, [e.target.name]: e.target.value }));
+            };
+
+            const toggleDetails = (invoiceId) => {
+                setExpandedInvoiceId(prevId => (prevId === invoiceId ? null : invoiceId));
+            };
+
+            const fetchData = async () => {
+                if (!dateRange.start || !dateRange.end) {
+                    setError('لطفا تاریخ شروع و پایان را انتخاب کنید.');
+                    return;
+                }
+                setIsLoading(true);
+                setError('');
+                setInvoices([]);
+                setSummary({ totalRevenue: 0, totalCosts: 0, totalProfit: 0, totalShippingProfitLoss: 0 });
+
+                try {
+                    // Step 1: Fetch invoices and their details
+                    const { data: invoiceData, error: fetchError } = await supabaseClient
+                        .from('demandinvoice')
+                        .select(`
+                            id,
+                            createdat,
+                            totalamount,
+                            discount,
+                            totalshippingprice,
+                            demandid,
+                            customer:customeruserid(fullname),
+                            demandinvoicedetail(
+                                demand_item_id,
+                                quantity,
+                                sales_price,
+                                demand_item:demand_item_id(product:productid(title))
+                            )
+                        `)
+                        .gte('createdat', new Date(dateRange.start).toISOString())
+                        .lte('createdat', new Date(dateRange.end + 'T23:59:59Z').toISOString())
+                        .order('createdat', { ascending: false });
+
+                    if (fetchError) throw fetchError;
+                    
+                    if (invoiceData.length === 0) {
+                        setInvoices([]);
+                        setIsLoading(false);
+                        return;
+                    }
+
+                    // Step 2: Collect all unique demand_item_ids and demand_ids
+                    const allDemandItemIds = invoiceData.flatMap(inv => inv.demandinvoicedetail.map(d => d.demand_item_id));
+                    const uniqueDemandItemIds = [...new Set(allDemandItemIds)];
+                    const uniqueDemandIds = [...new Set(invoiceData.map(inv => inv.demandid))];
+
+                    // Step 3: Fetch purchase prices from PO details
+                    const { data: poDetails, error: poDetailsError } = await supabaseClient
+                        .from('purchase_order_details')
+                        .select('demand_item_id, purchase_price')
+                        .in('demand_item_id', uniqueDemandItemIds);
+                    if (poDetailsError) throw poDetailsError;
+                    const priceMap = new Map(poDetails.map(item => [item.demand_item_id, item.purchase_price]));
+
+                    // Step 4: Fetch actual shipping costs from POs
+                    const { data: poShippingCosts, error: poShippingError } = await supabaseClient
+                        .from('purchase_orders')
+                        .select('demandid, actual_shipping_cost')
+                        .in('demandid', uniqueDemandIds);
+                    if (poShippingError) throw poShippingError;
+                    const shippingCostMap = new Map();
+                    poShippingCosts.forEach(po => {
+                        if (po.actual_shipping_cost > 0) {
+                            const currentCost = shippingCostMap.get(po.demandid) || 0;
+                            shippingCostMap.set(po.demandid, currentCost + po.actual_shipping_cost);
+                        }
+                    });
+
+                    // Step 5: Process invoices with all cost data
+                    let totalRevenue = 0;
+                    let totalCosts = 0;
+                    let totalShippingProfitLoss = 0;
+                    
+                    const processedInvoices = invoiceData.map(invoice => {
+                        let invoiceCostOfGoods = 0;
+                        
+                        const details = invoice.demandinvoicedetail.map(detail => {
+                            const purchasePrice = priceMap.get(detail.demand_item_id) || 0;
+                            const itemCost = purchasePrice * detail.quantity;
+                            invoiceCostOfGoods += itemCost;
+                            return {
+                                demand_item_id: detail.demand_item_id,
+                                productName: detail.demand_item?.product?.title || 'محصول نامشخص',
+                                quantity: detail.quantity,
+                                sales_price: detail.sales_price,
+                                purchase_price: purchasePrice,
+                                itemRevenue: detail.sales_price * detail.quantity,
+                                itemCost,
+                                itemProfit: (detail.sales_price * detail.quantity) - itemCost,
+                            };
+                        });
+                        
+                        const actualShippingCost = shippingCostMap.get(invoice.demandid) || 0;
+                        const shippingRevenue = invoice.totalshippingprice || 0;
+                        const shippingProfitLoss = shippingRevenue - actualShippingCost;
+
+                        const invoiceRevenue = invoice.totalamount;
+                        const totalInvoiceCost = invoiceCostOfGoods + (invoice.discount || 0) + actualShippingCost;
+                        const invoiceProfit = invoiceRevenue - totalInvoiceCost;
+                        
+                        totalRevenue += invoiceRevenue;
+                        totalCosts += totalInvoiceCost;
+                        totalShippingProfitLoss += shippingProfitLoss;
+
+                        return {
+                            ...invoice,
+                            revenue: invoiceRevenue,
+                            cost: totalInvoiceCost,
+                            profit: invoiceProfit,
+                            actualShippingCost,
+                            shippingProfitLoss,
+                            details,
+                        };
+                    });
+
+                    setInvoices(processedInvoices);
+                    setSummary({ totalRevenue, totalCosts, totalProfit: totalRevenue - totalCosts, totalShippingProfitLoss });
+
+                } catch (err) {
+                    console.error("Error fetching profit data:", err);
+                    setError(`خطا در بارگذاری اطلاعات: ${err.message}`);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+            
+            React.useEffect(() => {
+                fetchData();
+            }, []);
+
+            const renderInvoiceDetails = (invoice) => (
+                <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-b-lg">
+                    <h4 className="font-bold mb-3 text-md">جزئیات محاسبه سود</h4>
+                    <div className="space-y-3">
+                        {invoice.details.map(detail => (
+                            <div key={detail.demand_item_id} className="p-3 bg-white dark:bg-gray-800 rounded-lg text-sm border dark:border-gray-600">
+                                <p className="font-semibold mb-2">{detail.productName}</p>
+                                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                                    <p>تعداد: {detail.quantity}</p>
+                                    <p>قیمت فروش: {formatCurrency(detail.sales_price)}</p>
+                                    <p>درآمد آیتم: {formatCurrency(detail.itemRevenue)}</p>
+                                    <p>قیمت خرید: {formatCurrency(detail.purchase_price)}</p>
+                                    <p>هزینه آیتم: {formatCurrency(detail.itemCost)}</p>
+                                    <p className={`font-bold ${detail.itemProfit < 0 ? 'text-red-500' : 'text-green-500'}`}>سود آیتم: {formatCurrency(detail.itemProfit)}</p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                     <div className="mt-4 pt-3 border-t dark:border-gray-600 text-sm space-y-1">
+                        <div className="flex justify-between">
+                            <span>جمع سود آیتم‌ها:</span>
+                            <span className="font-semibold">{formatCurrency(invoice.details.reduce((sum, d) => sum + d.itemProfit, 0))} تومان</span>
+                        </div>
+                        <div className="flex justify-between">
+                           <span>هزینه حمل مشتری:</span>
+                           <span className="font-semibold">{formatCurrency(invoice.totalshippingprice || 0)} تومان</span>
+                        </div>
+                        <div className="flex justify-between text-red-500">
+                           <span>هزینه حمل تامین‌کننده:</span>
+                           <span className="font-semibold">- {formatCurrency(invoice.actualShippingCost || 0)} تومان</span>
+                        </div>
+                         <div className={`flex justify-between font-semibold ${invoice.shippingProfitLoss < 0 ? 'text-red-500' : 'text-green-500'}`}>
+                           <span>سود/زیان حمل:</span>
+                           <span>{formatCurrency(invoice.shippingProfitLoss || 0)} تومان</span>
+                        </div>
+                        <div className="flex justify-between text-red-500">
+                           <span>تخفیف فاکتور:</span>
+                           <span className="font-semibold">- {formatCurrency(invoice.discount || 0)} تومان</span>
+                        </div>
+                        <div className={`flex justify-between font-bold text-lg mt-2 pt-2 border-t dark:border-gray-500 ${invoice.profit < 0 ? 'text-red-500' : 'text-green-500'}`}>
+                           <span>سود نهایی فاکتور:</span>
+                           <span>{formatCurrency(invoice.profit)} تومان</span>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="p-4 md:p-8 text-gray-900 dark:text-gray-100 min-h-screen">
+                    <header className="mb-8">
+                        <h1 className="text-3xl font-bold">داشبورد تحلیل سود</h1>
+                        <p className="text-gray-500 dark:text-gray-400 mt-1">عملکرد مالی کسب و کار خود را بررسی کنید.</p>
+                    </header>
+
+                    <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-md mb-8">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 items-end">
+                            <div>
+                                <label htmlFor="start" className="block text-sm font-medium mb-1">از تاریخ</label>
+                                <input type="date" name="start" id="start" value={dateRange.start} onChange={handleDateChange} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-md border border-gray-300 dark:border-gray-600"/>
+                            </div>
+                            <div>
+                                <label htmlFor="end" className="block text-sm font-medium mb-1">تا تاریخ</label>
+                                <input type="date" name="end" id="end" value={dateRange.end} onChange={handleDateChange} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-md border border-gray-300 dark:border-gray-600"/>
+                            </div>
+                            <button onClick={fetchData} disabled={isLoading} className="w-full md:w-auto bg-indigo-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-indigo-700 disabled:bg-indigo-400 disabled:cursor-wait">
+                                {isLoading ? 'در حال بارگذاری...' : 'نمایش گزارش'}
+                            </button>
+                        </div>
+                    </div>
+                    
+                    {isLoading && <div className="spinner"></div>}
+                    {error && <p className="text-center p-8 text-red-500 bg-red-100 dark:bg-red-900/50 rounded-lg">{error}</p>}
+                    
+                    {!isLoading && !error && (
+                        <div>
+                            {/* Summary Cards */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6 mb-8">
+                                <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+                                    <h3 className="text-gray-500 dark:text-gray-400">درآمد کل</h3>
+                                    <p className="text-3xl font-bold text-blue-500 mt-2">{formatCurrency(summary.totalRevenue)} <span className="text-lg">تومان</span></p>
+                                </div>
+                                <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+                                    <h3 className="text-gray-500 dark:text-gray-400">هزینه کل (خرید + تخفیف + حمل)</h3>
+                                    <p className="text-3xl font-bold text-red-500 mt-2">{formatCurrency(summary.totalCosts)} <span className="text-lg">تومان</span></p>
+                                </div>
+                                 <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+                                    <h3 className="text-gray-500 dark:text-gray-400">سود/زیان حمل و نقل</h3>
+                                    <p className={`text-3xl font-bold mt-2 ${summary.totalShippingProfitLoss < 0 ? 'text-red-500' : 'text-green-500'}`}>{formatCurrency(summary.totalShippingProfitLoss)} <span className="text-lg">تومان</span></p>
+                                </div>
+                                <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+                                    <h3 className="text-gray-500 dark:text-gray-400">سود کل نهایی</h3>
+                                    <p className={`text-3xl font-bold mt-2 ${summary.totalProfit < 0 ? 'text-red-500' : 'text-green-500'}`}>{formatCurrency(summary.totalProfit)} <span className="text-lg">تومان</span></p>
+                                </div>
+                            </div>
+                            
+                            {/* Detailed Invoice List */}
+                             <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow">
+                                <h2 className="text-xl font-bold mb-4">جزئیات فاکتورها</h2>
+                                {/* Desktop Table */}
+                                <div className="hidden md:block">
+                                    <table className="w-full text-right">
+                                        <thead>
+                                            <tr className="border-b dark:border-gray-700">
+                                                <th className="p-3 font-semibold">شماره فاکتور</th>
+                                                <th className="p-3 font-semibold">مشتری</th>
+                                                <th className="p-3 font-semibold">تاریخ</th>
+                                                <th className="p-3 font-semibold">درآمد</th>
+                                                <th className="p-3 font-semibold">هزینه</th>
+                                                <th className="p-3 font-semibold">سود</th>
+                                                <th className="p-3 font-semibold"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {invoices.map(invoice => (
+                                                <React.Fragment key={invoice.id}>
+                                                    <tr className="border-b dark:border-gray-700 last:border-b-0 hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                                                        <td className="p-3 font-mono">{invoice.id}</td>
+                                                        <td className="p-3">{invoice.customer?.fullname || 'نامشخص'}</td>
+                                                        <td className="p-3">{new Date(invoice.createdat).toLocaleDateString('fa-IR')}</td>
+                                                        <td className="p-3 text-blue-500">{formatCurrency(invoice.revenue)}</td>
+                                                        <td className="p-3 text-red-500">{formatCurrency(invoice.cost)}</td>
+                                                        <td className={`p-3 font-semibold ${invoice.profit < 0 ? 'text-red-500' : 'text-green-500'}`}>{formatCurrency(invoice.profit)}</td>
+                                                        <td className="p-3">
+                                                            <button onClick={() => toggleDetails(invoice.id)} className="text-indigo-500 text-sm font-semibold">
+                                                                {expandedInvoiceId === invoice.id ? 'بستن' : 'جزئیات'}
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                    {expandedInvoiceId === invoice.id && (
+                                                        <tr className="bg-gray-50 dark:bg-gray-700/50">
+                                                            <td colSpan="7">{renderInvoiceDetails(invoice)}</td>
+                                                        </tr>
+                                                    )}
+                                                </React.Fragment>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                 {/* Mobile Card View */}
+                                <div className="md:hidden space-y-4">
+                                     {invoices.map(invoice => (
+                                        <div key={invoice.id} className="bg-gray-50 dark:bg-gray-700/50 rounded-lg shadow">
+                                            <div className="p-4">
+                                                <div className="flex justify-between items-center mb-3 pb-3 border-b dark:border-gray-600">
+                                                    <div>
+                                                        <span className="text-sm text-gray-500 dark:text-gray-400">فاکتور #{invoice.id}</span>
+                                                        <p className="font-semibold">{invoice.customer?.fullname || 'نامشخص'}</p>
+                                                    </div>
+                                                    <p className="text-sm">{new Date(invoice.createdat).toLocaleDateString('fa-IR')}</p>
+                                                </div>
+                                                <div className="grid grid-cols-3 gap-2 text-center text-sm mb-3">
+                                                    <div>
+                                                        <p className="text-xs text-gray-500 dark:text-gray-400">درآمد</p>
+                                                        <p className="font-semibold text-blue-500">{formatCurrency(invoice.revenue)}</p>
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-xs text-gray-500 dark:text-gray-400">هزینه</p>
+                                                        <p className="font-semibold text-red-500">{formatCurrency(invoice.cost)}</p>
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-xs text-gray-500 dark:text-gray-400">سود</p>
+                                                        <p className={`font-bold ${invoice.profit < 0 ? 'text-red-500' : 'text-green-500'}`}>{formatCurrency(invoice.profit)}</p>
+                                                    </div>
+                                                </div>
+                                                <button onClick={() => toggleDetails(invoice.id)} className="w-full text-center text-indigo-500 text-sm font-semibold py-2">
+                                                    {expandedInvoiceId === invoice.id ? 'بستن جزئیات' : 'نمایش جزئیات'}
+                                                </button>
+                                            </div>
+                                            {expandedInvoiceId === invoice.id && renderInvoiceDetails(invoice)}
+                                        </div>
+                                     ))}
+                                </div>
+                                {invoices.length === 0 && <p className="text-center py-8 text-gray-500">هیچ فاکتوری در این بازه زمانی یافت نشد.</p>}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<ProfitAnalysisDashboard />);
+    </script>
+</body>
+</html>
+
