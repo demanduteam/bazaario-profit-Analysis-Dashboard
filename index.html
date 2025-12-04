@@ -130,7 +130,8 @@
                 shippingProfitLoss: 50000,
                 revenue: 15000000,
                 cost: 14150000, 
-                profit: 850000
+                profit: 850000,
+                poStatus: "محاسبه سود و زیان انجام شد"
             },
             {
                 id: 1002,
@@ -156,7 +157,8 @@
                 shippingProfitLoss: -20000,
                 revenue: 8500000,
                 cost: 7720000,
-                profit: 780000
+                profit: 780000,
+                poStatus: "در حال پردازش"
             }
         ];
 
@@ -286,6 +288,7 @@
             const [isLoading, setIsLoading] = React.useState(false);
             const [error, setError] = React.useState('');
             const [isDemoMode, setIsDemoMode] = React.useState(false);
+            const [onlyCalculated, setOnlyCalculated] = React.useState(false);
             
             // Initial state: Last month to Today
             const [dateRange, setDateRange] = React.useState(() => {
@@ -322,6 +325,7 @@
                     ["گزارش تحلیل سود"],
                     ["تاریخ تهیه گزارش", new Date().toLocaleDateString('fa-IR')],
                     ["بازه زمانی", `از ${formatDateJalali(dateRange.start)} تا ${formatDateJalali(dateRange.end)}`],
+                    ["فیلتر", onlyCalculated ? "فقط سفارش‌های محاسبه شده" : "همه سفارش‌ها"],
                     [],
                     ["شاخص", "مقدار (تومان)"],
                     ["درآمد کل", Math.round(summary.totalRevenue)],
@@ -385,11 +389,18 @@
             const loadDemoData = () => {
                 setIsDemoMode(true);
                 setError('');
-                setInvoices(MOCK_DATA);
+                
+                // Filter mock data if enabled
+                const filteredData = MOCK_DATA.filter(inv => {
+                    if (onlyCalculated && inv.poStatus !== 'محاسبه سود و زیان انجام شد') return false;
+                    return true;
+                });
+                
+                setInvoices(filteredData);
                 
                 // Calculate summary for mock data
                 let totalItemProfit = 0;
-                const mockSummary = MOCK_DATA.reduce((acc, inv) => {
+                const mockSummary = filteredData.reduce((acc, inv) => {
                     const invItemProfit = inv.details.reduce((sum, d) => sum + d.itemProfit, 0);
                     totalItemProfit += invItemProfit;
                     return {
@@ -403,7 +414,7 @@
                 setSummary({
                     ...mockSummary,
                     totalItemProfit,
-                    invoiceCount: MOCK_DATA.length
+                    invoiceCount: filteredData.length
                 });
             };
 
@@ -466,18 +477,25 @@
                     if (poDetailsError) throw poDetailsError;
                     const priceMap = new Map(poDetails.map(item => [item.demand_item_id, item.purchase_price]));
 
-                    // Step 4: Fetch actual shipping costs from POs
-                    const { data: poShippingCosts, error: poShippingError } = await supabaseClient
+                    // Step 4: Fetch actual shipping costs AND STATUS from POs
+                    const { data: poData, error: poDataError } = await supabaseClient
                         .from('purchase_orders')
-                        .select('demandid, actual_shipping_cost')
+                        .select('demandid, actual_shipping_cost, status')
                         .in('demandid', uniqueDemandIds);
-                    if (poShippingError) throw poShippingError;
+                    if (poDataError) throw poDataError;
                     
                     const shippingCostMap = new Map();
-                    poShippingCosts.forEach(po => {
+                    const poStatusMap = new Map(); // Store status
+
+                    poData.forEach(po => {
+                        // Aggregate shipping costs if multiple POs exist for one demand
                         if (po.actual_shipping_cost > 0) {
                             const currentCost = shippingCostMap.get(po.demandid) || 0;
                             shippingCostMap.set(po.demandid, currentCost + po.actual_shipping_cost);
+                        }
+                        // Store status (assuming last one wins or single PO)
+                        if (po.status) {
+                             poStatusMap.set(po.demandid, po.status);
                         }
                     });
 
@@ -487,7 +505,14 @@
                     let totalShippingProfitLoss = 0;
                     let totalItemProfit = 0;
                     
-                    const processedInvoices = invoiceData.map(invoice => {
+                    // Filter and map in one go
+                    const processedInvoices = invoiceData.reduce((acc, invoice) => {
+                        // FILTER LOGIC
+                        const poStatus = poStatusMap.get(invoice.demandid);
+                        if (onlyCalculated && poStatus !== 'محاسبه سود و زیان انجام شد') {
+                            return acc; // Skip this invoice
+                        }
+
                         let invoiceCostOfGoods = 0;
                         let invoiceItemProfit = 0;
                         
@@ -522,7 +547,7 @@
                         totalShippingProfitLoss += shippingProfitLoss;
                         totalItemProfit += invoiceItemProfit;
 
-                        return {
+                        acc.push({
                             ...invoice,
                             revenue: invoiceRevenue,
                             cost: totalInvoiceCost,
@@ -530,8 +555,9 @@
                             actualShippingCost,
                             shippingProfitLoss,
                             details,
-                        };
-                    });
+                        });
+                        return acc;
+                    }, []);
 
                     setInvoices(processedInvoices);
                     setSummary({ 
@@ -561,9 +587,11 @@
                 }
             };
             
+            // Re-fetch when filter changes, or just re-filter if we stored raw data? 
+            // For simplicity and accuracy with DB, we re-fetch/re-process.
             React.useEffect(() => {
                 fetchData();
-            }, []);
+            }, [onlyCalculated]); // Add onlyCalculated to dependency array
             
             // Calculate Averages
             const avgRevenue = summary.invoiceCount ? summary.totalRevenue / summary.invoiceCount : 0;
@@ -633,7 +661,7 @@
                     </header>
 
                     <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg border dark:border-gray-700 mb-8">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 items-end">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 items-end">
                             <JalaliDatePicker 
                                 label="از تاریخ"
                                 value={dateRange.start}
@@ -645,6 +673,25 @@
                                 onChange={(val) => handleDateChange('end', val)}
                             />
                             
+                             {/* Filter Checkbox */}
+                            <div className="flex items-center h-10 px-2">
+                                <label className="flex items-center gap-2 cursor-pointer select-none">
+                                    <div className="relative">
+                                        <input 
+                                            type="checkbox" 
+                                            className="sr-only"
+                                            checked={onlyCalculated}
+                                            onChange={(e) => setOnlyCalculated(e.target.checked)}
+                                        />
+                                        <div className={`block w-10 h-6 rounded-full transition-colors ${onlyCalculated ? 'bg-indigo-600' : 'bg-gray-300 dark:bg-gray-600'}`}></div>
+                                        <div className={`dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform ${onlyCalculated ? 'transform translate-x-4' : ''}`}></div>
+                                    </div>
+                                    <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                                        فقط سفارش‌های محاسبه شده
+                                    </span>
+                                </label>
+                            </div>
+
                             <div className="flex gap-2 h-10 self-end">
                                 <button onClick={() => { setIsDemoMode(false); fetchData(); }} disabled={isLoading} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg transition-colors shadow-md disabled:bg-indigo-400 disabled:cursor-wait text-sm">
                                     {isLoading ? '...' : 'بروزرسانی'}
@@ -793,7 +840,7 @@
                                         </div>
                                      ))}
                                 </div>
-                                {invoices.length === 0 && <p className="text-center py-12 text-gray-500 dark:text-gray-400">هیچ فاکتوری در این بازه زمانی یافت نشد.</p>}
+                                {invoices.length === 0 && <p className="text-center py-12 text-gray-500 dark:text-gray-400">هیچ فاکتوری با شرایط فعلی یافت نشد.</p>}
                             </div>
                         </div>
                     )}
